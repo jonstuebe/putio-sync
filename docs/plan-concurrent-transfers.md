@@ -1,6 +1,6 @@
 # Plan: concurrent transfers + download-manager progress UI
 
-Status: agreed, not yet implemented.
+Status: implemented on branch `concurrent-transfers`, in the four commits described below.
 Branch: off `v2`.
 Toolchain: Go 1.24 via `mise` (`mise.toml`). Baseline `go build ./...` and `go test ./...` are green
 (cgo deprecation warnings from `fsevents` only).
@@ -186,7 +186,8 @@ Under `-race`:
 - **Retry classifier**: table test over error kinds, including stall-cancel with a live parent vs
   a cancelled one.
 - **`DirCache`**: concurrent `Mkdirp` on overlapping paths - no panic, no duplicate
-  `CreateFolder` calls for the same path.
+  `CreateFolder` calls for the same path. (Six paths with shared prefixes dedupe to six distinct
+  folders, not five as an earlier draft of this said.)
 
 Plain table test:
 - **Renderer formatting**: byte and rate humanization, ETA formatting and its `--` cases,
