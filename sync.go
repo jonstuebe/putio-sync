@@ -19,7 +19,20 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-const defaultTimeout = 10 * time.Second
+const (
+	// defaultTimeout is the timeout for a single API request.
+	defaultTimeout = 10 * time.Second
+
+	// transferStallTimeout is how long a transfer may go without receiving any
+	// bytes before it is considered stalled and cancelled. It is deliberately
+	// separate from defaultTimeout: with several transfers sharing a link, a
+	// merely starved stream can go quiet for a while without being dead.
+	transferStallTimeout = 60 * time.Second
+
+	// dbOpenTimeout is how long to wait for the exclusive lock on the database
+	// file before reporting that another instance is running.
+	dbOpenTimeout = 5 * time.Second
+)
 
 var ErrInvalidCredentials = errors.New("invalid credentials")
 
@@ -52,8 +65,11 @@ func Sync(ctx context.Context, config Config) error {
 		return err
 	}
 	log.Infof("Using database file %q", dbPath)
-	db, err = bbolt.Open(dbPath, 0666, nil)
+	db, err = bbolt.Open(dbPath, 0666, &bbolt.Options{Timeout: dbOpenTimeout})
 	if err != nil {
+		if errors.Is(err, bbolt.ErrTimeout) {
+			return fmt.Errorf("cannot lock database file %q: another instance is already running", dbPath)
+		}
 		return err
 	}
 	defer db.Close()

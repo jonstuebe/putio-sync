@@ -101,7 +101,7 @@ func (d *downloadJob) Run(ctx context.Context) error {
 
 		// Stop download if download speed is too slow.
 		// Timer for cancelling the context will be reset after each successful read from stream.
-		trw := &timerResetWriter{timer: time.AfterFunc(defaultTimeout, cancel)}
+		trw := &timerResetWriter{timer: time.AfterFunc(transferStallTimeout, cancel)}
 		tr := io.TeeReader(rc, trw)
 
 		pr := progress.New(tr, d.state.Offset, d.state.Size, d.String())
@@ -181,6 +181,6 @@ type timerResetWriter struct {
 }
 
 func (w *timerResetWriter) Write(p []byte) (int, error) {
-	w.timer.Reset(defaultTimeout)
+	w.timer.Reset(transferStallTimeout)
 	return len(p), nil
 }
