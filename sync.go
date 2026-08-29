@@ -227,6 +227,9 @@ func syncRoots(ctx context.Context) error {
 	renderer.Start()
 	defer renderer.Stop()
 
+	setRegistry(reg)
+	defer setRegistry(nil)
+
 	err = runTransfers(ctx, transfers, cfg.Concurrency, reg)
 	if err != nil {
 		setSyncStatus("Error: " + err.Error())
