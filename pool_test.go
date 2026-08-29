@@ -15,6 +15,7 @@ import (
 
 	"github.com/putdotio/go-putio"
 	"github.com/putdotio/putio-sync/v2/internal/auth"
+	"github.com/putdotio/putio-sync/v2/internal/progress"
 )
 
 // fakeJob is a transfer job whose Run is supplied by the test.
@@ -24,8 +25,10 @@ type fakeJob struct {
 	run     func(ctx context.Context, attempt int32) error
 }
 
-func (j *fakeJob) String() string  { return "Transferring " + j.relpath }
-func (j *fakeJob) RelPath() string { return j.relpath }
+func (j *fakeJob) String() string                { return "Transferring " + j.relpath }
+func (j *fakeJob) RelPath() string               { return j.relpath }
+func (j *fakeJob) Direction() progress.Direction { return progress.Download }
+func (j *fakeJob) Size() int64                   { return 1 << 20 }
 
 func (j *fakeJob) Run(ctx context.Context) error {
 	attempt := atomic.AddInt32(&j.runs, 1)
@@ -75,7 +78,7 @@ func TestRunTransfersRespectsConcurrency(t *testing.T) {
 		})
 	}
 
-	if err := runTransfers(context.Background(), jobs, concurrency); err != nil {
+	if err := runTransfers(context.Background(), jobs, concurrency, nil); err != nil {
 		t.Fatal(err)
 	}
 	if peak > concurrency {
@@ -117,7 +120,7 @@ func TestRunTransfersExcludesSameRelPath(t *testing.T) {
 		newJob("same"), newJob("same"), newJob("same"),
 		newJob("other-1"), newJob("other-2"),
 	}
-	if err := runTransfers(context.Background(), jobs, 5); err != nil {
+	if err := runTransfers(context.Background(), jobs, 5, nil); err != nil {
 		t.Fatal(err)
 	}
 	if overlaps != 0 {
@@ -140,7 +143,7 @@ func TestRunTransfersAggregatesFailures(t *testing.T) {
 		&fakeJob{relpath: "ok-2"},
 		&fakeJob{relpath: "bad-2", run: func(context.Context, int32) error { return errBad }},
 	}
-	err := runTransfers(context.Background(), jobs, 2)
+	err := runTransfers(context.Background(), jobs, 2, nil)
 	if err == nil {
 		t.Fatal("want an error")
 	}
@@ -179,7 +182,7 @@ func TestRunTransfersRetriesTransientFailures(t *testing.T) {
 	}}
 	doomed := &fakeJob{relpath: "doomed", run: func(context.Context, int32) error { return temporary }}
 
-	err := runTransfers(context.Background(), []iTransferJob{flaky, doomed}, 2)
+	err := runTransfers(context.Background(), []iTransferJob{flaky, doomed}, 2, nil)
 	if err == nil {
 		t.Fatal("want an error for the job that never succeeded")
 	}
@@ -217,7 +220,7 @@ func TestRunTransfersAbortsOnInvalidCredentials(t *testing.T) {
 		}})
 	}
 
-	err := runTransfers(context.Background(), jobs, 2)
+	err := runTransfers(context.Background(), jobs, 2, nil)
 	if !errors.Is(err, auth.ErrInvalidCredentials) {
 		t.Fatalf("got %v, want ErrInvalidCredentials", err)
 	}
@@ -249,7 +252,7 @@ func TestRunTransfersStopsWhenContextCancelled(t *testing.T) {
 		}})
 	}
 
-	err := runTransfers(ctx, jobs, 2)
+	err := runTransfers(ctx, jobs, 2, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
@@ -259,7 +262,7 @@ func TestRunTransfersStopsWhenContextCancelled(t *testing.T) {
 }
 
 func TestRunTransfersEmpty(t *testing.T) {
-	if err := runTransfers(context.Background(), nil, 4); err != nil {
+	if err := runTransfers(context.Background(), nil, 4, nil); err != nil {
 		t.Fatal(err)
 	}
 }

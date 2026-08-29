@@ -12,6 +12,7 @@ import (
 	"github.com/putdotio/go-putio"
 	"github.com/putdotio/putio-sync/v2/internal/auth"
 	"github.com/putdotio/putio-sync/v2/internal/dircache"
+	"github.com/putdotio/putio-sync/v2/internal/progress"
 	"github.com/putdotio/putio-sync/v2/internal/tmpdir"
 	"github.com/putdotio/putio-sync/v2/internal/updates"
 	"github.com/putdotio/putio-sync/v2/internal/walker"
@@ -220,7 +221,13 @@ func syncRoots(ctx context.Context) error {
 	}
 
 	setSyncStatus(fmt.Sprintf("Transferring %d file(s)", len(transfers)))
-	err = runTransfers(ctx, transfers, cfg.Concurrency)
+	reg := progress.NewRegistry()
+	renderer := progress.NewRenderer(reg)
+	reg.SetListener(renderer)
+	renderer.Start()
+	defer renderer.Stop()
+
+	err = runTransfers(ctx, transfers, cfg.Concurrency, reg)
 	if err != nil {
 		setSyncStatus("Error: " + err.Error())
 		return err

@@ -13,6 +13,7 @@ import (
 	"github.com/cenkalti/log"
 	"github.com/putdotio/go-putio"
 	"github.com/putdotio/putio-sync/v2/internal/auth"
+	"github.com/putdotio/putio-sync/v2/internal/progress"
 )
 
 // transferAttempts is the total number of times a transfer job is run before
@@ -32,6 +33,11 @@ type iTransferJob interface {
 	// RelPath is the path of the file being transferred, relative to the sync
 	// root. Two jobs with the same RelPath never run at the same time.
 	RelPath() string
+
+	// Direction and Size describe the transfer to the progress display before
+	// it starts.
+	Direction() progress.Direction
+	Size() int64
 }
 
 // runTransfers runs the given jobs on a pool of concurrency workers.
@@ -40,7 +46,7 @@ type iTransferJob interface {
 // remaining jobs still run, and all failures are returned joined together at
 // the end. Invalid credentials and cancellation of ctx are the exceptions;
 // both abort the pass immediately, because nothing after them can succeed.
-func runTransfers(ctx context.Context, jobs []iTransferJob, concurrency int) error {
+func runTransfers(ctx context.Context, jobs []iTransferJob, concurrency int, reg *progress.Registry) error {
 	if len(jobs) == 0 {
 		return nil
 	}
@@ -52,13 +58,23 @@ func runTransfers(ctx context.Context, jobs []iTransferJob, concurrency int) err
 	}
 	log.Infof("Transferring %d file(s), %d at a time", len(jobs), concurrency)
 
+	if reg == nil {
+		reg = progress.NewRegistry()
+	}
+	// Register the whole queue before starting, so the display can say how
+	// much work is left rather than only what is in flight.
+	units := make([]transferUnit, len(jobs))
+	for i, job := range jobs {
+		units[i] = transferUnit{job: job, tracker: reg.Enqueue(job.Direction(), job.RelPath(), job.Size())}
+	}
+
 	// A fatal error cancels workerCtx to wind the pass down early. The parent
 	// ctx is kept separate so we can tell "we gave up" from "the caller quit".
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	inflight := newInflightSet()
-	jobC := make(chan iTransferJob)
+	jobC := make(chan transferUnit)
 
 	var (
 		mu    sync.Mutex
@@ -71,8 +87,9 @@ func runTransfers(ctx context.Context, jobs []iTransferJob, concurrency int) err
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for job := range jobC {
-				err := runTransfer(workerCtx, inflight, job)
+			for unit := range jobC {
+				job := unit.job
+				err := runTransfer(workerCtx, inflight, reg, unit)
 				if err == nil {
 					continue
 				}
@@ -96,9 +113,9 @@ func runTransfers(ctx context.Context, jobs []iTransferJob, concurrency int) err
 	}
 
 feed:
-	for _, job := range jobs {
+	for _, unit := range units {
 		select {
-		case jobC <- job:
+		case jobC <- unit:
 		case <-workerCtx.Done():
 			break feed
 		}
@@ -115,14 +132,24 @@ feed:
 	return errors.Join(errs...)
 }
 
-func runTransfer(ctx context.Context, inflight *inflightSet, job iTransferJob) error {
-	inflight.acquire(job.RelPath())
-	defer inflight.release(job.RelPath())
+// transferUnit pairs a job with the progress tracker it reports to.
+type transferUnit struct {
+	job     iTransferJob
+	tracker *progress.Tracker
+}
+
+func runTransfer(ctx context.Context, inflight *inflightSet, reg *progress.Registry, unit transferUnit) error {
+	inflight.acquire(unit.job.RelPath())
+	defer inflight.release(unit.job.RelPath())
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	log.Infoln(job.String())
-	return runWithRetry(ctx, job)
+	reg.Start(unit.tracker)
+	// The job reads its tracker off the context, so retries reuse it and the
+	// file keeps one bar across attempts.
+	err := runWithRetry(progress.WithTracker(ctx, unit.tracker), unit.job)
+	reg.Finish(unit.tracker, err)
+	return err
 }
 
 // runWithRetry runs job, retrying transient failures. Both transfer jobs

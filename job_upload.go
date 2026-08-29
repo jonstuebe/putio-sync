@@ -26,6 +26,14 @@ func (d *uploadJob) RelPath() string {
 	return d.localFile.RelPath()
 }
 
+func (d *uploadJob) Direction() progress.Direction {
+	return progress.Upload
+}
+
+func (d *uploadJob) Size() int64 {
+	return d.localFile.Info().Size()
+}
+
 func (d *uploadJob) tryResume(ctx context.Context) bool {
 	if d.state == nil {
 		return false
@@ -52,6 +60,8 @@ func (d *uploadJob) tryResume(ctx context.Context) bool {
 }
 
 func (d *uploadJob) Run(ctx context.Context) error {
+	tracker := progress.TrackerFrom(ctx)
+
 	modwatch, err := watcher.WatchFileModification(ctx, d.localFile.FullPath())
 	if err != nil {
 		return err
@@ -94,10 +104,8 @@ func (d *uploadJob) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	pr := progress.New(f, d.state.Offset, d.state.Size, d.String())
-	pr.Start()
-	fileID, crc32, err := client.Upload.SendFile(modwatch.Context(), pr, d.state.UploadURL, d.state.Offset)
-	pr.Stop()
+	tracker.Reset(d.state.Offset, d.state.Size)
+	fileID, crc32, err := client.Upload.SendFile(modwatch.Context(), tracker.Wrap(f), d.state.UploadURL, d.state.Offset)
 	modified := modwatch.Stop()
 	if modified {
 		log.Warningln("File modified while uploading")

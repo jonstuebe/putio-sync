@@ -27,6 +27,14 @@ func (d *downloadJob) RelPath() string {
 	return d.remoteFile.RelPath()
 }
 
+func (d *downloadJob) Direction() progress.Direction {
+	return progress.Download
+}
+
+func (d *downloadJob) Size() int64 {
+	return d.remoteFile.PutioFile().Size
+}
+
 func (d *downloadJob) tryResume() io.WriteCloser {
 	if d.state == nil {
 		return nil
@@ -67,6 +75,8 @@ func (d *downloadJob) tryResume() io.WriteCloser {
 }
 
 func (d *downloadJob) Run(ctx context.Context) error {
+	tracker := progress.TrackerFrom(ctx)
+
 	fileWatcher := notifier.WatchFile(ctx, d.remoteFile.PutioFile().ID)
 	defer fileWatcher.Stop()
 
@@ -108,10 +118,8 @@ func (d *downloadJob) Run(ctx context.Context) error {
 		trw := &timerResetWriter{timer: time.AfterFunc(transferStallTimeout, cancel)}
 		tr := io.TeeReader(rc, trw)
 
-		pr := progress.New(tr, d.state.Offset, d.state.Size, d.String())
-		pr.Start()
-		n, copyErr := io.CopyN(wc, pr, remaining)
-		pr.Stop()
+		tracker.Reset(d.state.Offset, d.state.Size)
+		n, copyErr := io.CopyN(wc, tracker.Wrap(tr), remaining)
 
 		err = wc.Close()
 		if err != nil {
