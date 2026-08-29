@@ -23,6 +23,18 @@ func (d *downloadJob) String() string {
 	return fmt.Sprintf("Downloading %q", d.remoteFile.RelPath())
 }
 
+func (d *downloadJob) RelPath() string {
+	return d.remoteFile.RelPath()
+}
+
+func (d *downloadJob) Direction() progress.Direction {
+	return progress.Download
+}
+
+func (d *downloadJob) Size() int64 {
+	return d.remoteFile.PutioFile().Size
+}
+
 func (d *downloadJob) tryResume() io.WriteCloser {
 	if d.state == nil {
 		return nil
@@ -63,6 +75,8 @@ func (d *downloadJob) tryResume() io.WriteCloser {
 }
 
 func (d *downloadJob) Run(ctx context.Context) error {
+	tracker := progress.TrackerFrom(ctx)
+
 	fileWatcher := notifier.WatchFile(ctx, d.remoteFile.PutioFile().ID)
 	defer fileWatcher.Stop()
 
@@ -101,13 +115,11 @@ func (d *downloadJob) Run(ctx context.Context) error {
 
 		// Stop download if download speed is too slow.
 		// Timer for cancelling the context will be reset after each successful read from stream.
-		trw := &timerResetWriter{timer: time.AfterFunc(defaultTimeout, cancel)}
+		trw := &timerResetWriter{timer: time.AfterFunc(transferStallTimeout, cancel)}
 		tr := io.TeeReader(rc, trw)
 
-		pr := progress.New(tr, d.state.Offset, d.state.Size, d.String())
-		pr.Start()
-		n, copyErr := io.CopyN(wc, pr, remaining)
-		pr.Stop()
+		tracker.Reset(d.state.Offset, d.state.Size)
+		n, copyErr := io.CopyN(wc, tracker.Wrap(tr), remaining)
 
 		err = wc.Close()
 		if err != nil {
@@ -169,11 +181,22 @@ func (d *downloadJob) openRemote(ctx context.Context, offset int64) (rc io.ReadC
 	}
 	if resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
-		err = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		err = &unexpectedStatusError{code: resp.StatusCode}
 		return
 	}
 	rc = resp.Body
 	return
+}
+
+// unexpectedStatusError is returned when the file server answers a ranged GET
+// with something other than 206. It carries the code so the retry logic can
+// tell a temporary 503 from a permanent 404.
+type unexpectedStatusError struct {
+	code int
+}
+
+func (e *unexpectedStatusError) Error() string {
+	return fmt.Sprintf("unexpected status code: %d", e.code)
 }
 
 type timerResetWriter struct {
@@ -181,6 +204,6 @@ type timerResetWriter struct {
 }
 
 func (w *timerResetWriter) Write(p []byte) (int, error) {
-	w.timer.Reset(defaultTimeout)
+	w.timer.Reset(transferStallTimeout)
 	return len(p), nil
 }

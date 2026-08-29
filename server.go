@@ -9,7 +9,51 @@ import (
 	"time"
 
 	"github.com/cenkalti/log"
+	"github.com/putdotio/putio-sync/v2/internal/progress"
 )
+
+// statusResponse is the body of GET /status. The status field predates the
+// transfers list and keeps its shape, so anything already parsing it carries
+// on working.
+type statusResponse struct {
+	Status    string           `json:"status"`
+	Transfers []transferStatus `json:"transfers"`
+}
+
+type transferStatus struct {
+	Path      string `json:"path"`
+	Direction string `json:"direction"`
+	Bytes     int64  `json:"bytes"`
+	Total     int64  `json:"total"`
+	Speed     int64  `json:"speed"`
+	Percent   int    `json:"percent"`
+}
+
+// currentTransfers describes what is being transferred right now.
+func currentTransfers() statusResponse {
+	// Never nil: an empty list encodes as [] rather than null, so clients do
+	// not need a special case for an idle sync.
+	resp := statusResponse{Status: currentStatus(), Transfers: []transferStatus{}}
+	reg := getRegistry()
+	if reg == nil {
+		return resp
+	}
+	for _, s := range reg.Snapshot().Active {
+		direction := "download"
+		if s.Direction == progress.Upload {
+			direction = "upload"
+		}
+		resp.Transfers = append(resp.Transfers, transferStatus{
+			Path:      s.RelPath,
+			Direction: direction,
+			Bytes:     s.Offset,
+			Total:     s.Size,
+			Speed:     s.Rate,
+			Percent:   s.Percent(),
+		})
+	}
+	return resp
+}
 
 const (
 	serverReadTimeout     = 5 * time.Second
@@ -24,10 +68,15 @@ type httpServer struct {
 func newServer(addr string) *httpServer {
 	m := http.NewServeMux()
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("putio-sync")) })
-	m.HandleFunc("/syncing", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(fmt.Sprintf("%v", syncing))) })
+	m.HandleFunc("/syncing", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(fmt.Sprintf("%v", isSyncing()))) })
 	m.HandleFunc("/trigger", func(w http.ResponseWriter, r *http.Request) { triggerSync() })
 	m.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := json.Marshal(map[string]string{"status": syncStatus})
+		b, err := json.Marshal(currentTransfers())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(b)
 	})
 	s := &httpServer{

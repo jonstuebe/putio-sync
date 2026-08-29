@@ -12,6 +12,7 @@ import (
 	"github.com/putdotio/go-putio"
 	"github.com/putdotio/putio-sync/v2/internal/auth"
 	"github.com/putdotio/putio-sync/v2/internal/dircache"
+	"github.com/putdotio/putio-sync/v2/internal/progress"
 	"github.com/putdotio/putio-sync/v2/internal/tmpdir"
 	"github.com/putdotio/putio-sync/v2/internal/updates"
 	"github.com/putdotio/putio-sync/v2/internal/walker"
@@ -19,7 +20,20 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-const defaultTimeout = 10 * time.Second
+const (
+	// defaultTimeout is the timeout for a single API request.
+	defaultTimeout = 10 * time.Second
+
+	// transferStallTimeout is how long a transfer may go without receiving any
+	// bytes before it is considered stalled and cancelled. It is deliberately
+	// separate from defaultTimeout: with several transfers sharing a link, a
+	// merely starved stream can go quiet for a while without being dead.
+	transferStallTimeout = 60 * time.Second
+
+	// dbOpenTimeout is how long to wait for the exclusive lock on the database
+	// file before reporting that another instance is running.
+	dbOpenTimeout = 5 * time.Second
+)
 
 var ErrInvalidCredentials = errors.New("invalid credentials")
 
@@ -35,12 +49,11 @@ var (
 	remoteFolderID int64
 	dirCache       *dircache.DirCache
 	tempDirPath    string
-	syncing        bool
-	syncStatus     = "Starting sync..."
 	triggerSyncC   = make(chan struct{}, 1)
 )
 
 func Sync(ctx context.Context, config Config) error {
+	config.setDefaults()
 	if err := config.validate(); err != nil {
 		return err
 	}
@@ -52,8 +65,11 @@ func Sync(ctx context.Context, config Config) error {
 		return err
 	}
 	log.Infof("Using database file %q", dbPath)
-	db, err = bbolt.Open(dbPath, 0666, nil)
+	db, err = bbolt.Open(dbPath, 0666, &bbolt.Options{Timeout: dbOpenTimeout})
 	if err != nil {
+		if errors.Is(err, bbolt.ErrTimeout) {
+			return fmt.Errorf("cannot lock database file %q: another instance is already running", dbPath)
+		}
 		return err
 	}
 	defer db.Close()
@@ -83,8 +99,8 @@ func Sync(ctx context.Context, config Config) error {
 			}
 			log.Error(err)
 		} else {
-			syncStatus = "Sync finished successfully"
-			log.Infoln(syncStatus)
+			setSyncStatus("Sync finished successfully")
+			log.Infoln(getSyncStatus())
 		}
 		ok := waitNextSync(ctx)
 		if !ok {
@@ -177,21 +193,65 @@ func syncRoots(ctx context.Context) error {
 		log.Infoln("No changes detected")
 		return nil
 	}
-	syncing = true
-	defer func() { syncing = false }()
-	for _, job := range jobs {
-		syncStatus = job.String()
-		log.Infoln(syncStatus)
+	setSyncing(true)
+	defer setSyncing(false)
+
+	// Metadata jobs run first, one at a time, in the order reconciliation put
+	// them in. They are millisecond-scale API and filesystem calls, so there
+	// is nothing to win by running them concurrently, and running them first
+	// means a folder always exists before anything is transferred into it.
+	metadata, transfers := splitJobs(jobs)
+	for _, job := range metadata {
+		setSyncStatus(job.String())
+		log.Infoln(job.String())
 		if cfg.DryRun {
 			continue
 		}
-		err = job.Run(ctx)
-		if err != nil {
-			syncStatus = "Error: " + err.Error()
+		if err := job.Run(ctx); err != nil {
+			setSyncStatus("Error: " + err.Error())
 			return err
 		}
 	}
+
+	if cfg.DryRun {
+		for _, job := range transfers {
+			log.Infoln(job.String())
+		}
+		return nil
+	}
+
+	setSyncStatus(fmt.Sprintf("Transferring %d file(s)", len(transfers)))
+	reg := progress.NewRegistry()
+	renderer := progress.NewRenderer(reg)
+	reg.SetListener(renderer)
+	renderer.Start()
+	defer renderer.Stop()
+
+	setRegistry(reg)
+	defer setRegistry(nil)
+
+	err = runTransfers(ctx, transfers, cfg.Concurrency, reg)
+	if err != nil {
+		setSyncStatus("Error: " + err.Error())
+		return err
+	}
 	return nil
+}
+
+// splitJobs separates the jobs that move file contents from the ones that only
+// touch metadata. Only the former run concurrently.
+func splitJobs(jobs []iJob) (metadata []iJob, transfers []iTransferJob) {
+	for _, job := range jobs {
+		switch j := job.(type) {
+		case *downloadJob:
+			transfers = append(transfers, j)
+		case *uploadJob:
+			transfers = append(transfers, j)
+		default:
+			metadata = append(metadata, job)
+		}
+	}
+	return metadata, transfers
 }
 
 func waitNextSync(ctx context.Context) bool {

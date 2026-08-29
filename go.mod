@@ -14,6 +14,7 @@ require (
 	github.com/syncthing/syncthing v1.23.5
 	go.etcd.io/bbolt v1.3.7
 	golang.org/x/oauth2 v0.9.0
+	golang.org/x/term v0.9.0
 	golang.org/x/text v0.10.0
 )
 

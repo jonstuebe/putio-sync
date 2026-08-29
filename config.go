@@ -10,6 +10,10 @@ import (
 	"github.com/knadh/koanf/providers/file"
 )
 
+// defaultConcurrency is the number of files transferred at the same time when
+// the config does not say otherwise.
+const defaultConcurrency = 4
+
 type ConfigError struct {
 	Reason string
 }
@@ -43,6 +47,9 @@ type Config struct {
 	Server string
 	// Set log level to debug.
 	Debug bool
+	// Number of files to transfer at the same time. Defaults to 4.
+	// Values below 1 are treated as 1.
+	Concurrency int
 }
 
 func (c *Config) validate() error {
@@ -78,5 +85,11 @@ func (c *Config) Read(configPath string) error {
 func (c *Config) setDefaults() {
 	if c.LocalDir == "" {
 		c.LocalDir = "~/putio-sync"
+	}
+	if c.Concurrency == 0 {
+		c.Concurrency = defaultConcurrency
+	}
+	if c.Concurrency < 1 {
+		c.Concurrency = 1
 	}
 }
