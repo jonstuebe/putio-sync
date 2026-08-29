@@ -22,6 +22,10 @@ func (d *uploadJob) String() string {
 	return fmt.Sprintf("Uploading %q", d.localFile.RelPath())
 }
 
+func (d *uploadJob) RelPath() string {
+	return d.localFile.RelPath()
+}
+
 func (d *uploadJob) tryResume(ctx context.Context) bool {
 	if d.state == nil {
 		return false

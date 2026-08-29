@@ -23,6 +23,10 @@ func (d *downloadJob) String() string {
 	return fmt.Sprintf("Downloading %q", d.remoteFile.RelPath())
 }
 
+func (d *downloadJob) RelPath() string {
+	return d.remoteFile.RelPath()
+}
+
 func (d *downloadJob) tryResume() io.WriteCloser {
 	if d.state == nil {
 		return nil
@@ -169,11 +173,22 @@ func (d *downloadJob) openRemote(ctx context.Context, offset int64) (rc io.ReadC
 	}
 	if resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
-		err = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		err = &unexpectedStatusError{code: resp.StatusCode}
 		return
 	}
 	rc = resp.Body
 	return
+}
+
+// unexpectedStatusError is returned when the file server answers a ranged GET
+// with something other than 206. It carries the code so the retry logic can
+// tell a temporary 503 from a permanent 404.
+type unexpectedStatusError struct {
+	code int
+}
+
+func (e *unexpectedStatusError) Error() string {
+	return fmt.Sprintf("unexpected status code: %d", e.code)
 }
 
 type timerResetWriter struct {

@@ -48,12 +48,11 @@ var (
 	remoteFolderID int64
 	dirCache       *dircache.DirCache
 	tempDirPath    string
-	syncing        bool
-	syncStatus     = "Starting sync..."
 	triggerSyncC   = make(chan struct{}, 1)
 )
 
 func Sync(ctx context.Context, config Config) error {
+	config.setDefaults()
 	if err := config.validate(); err != nil {
 		return err
 	}
@@ -99,8 +98,8 @@ func Sync(ctx context.Context, config Config) error {
 			}
 			log.Error(err)
 		} else {
-			syncStatus = "Sync finished successfully"
-			log.Infoln(syncStatus)
+			setSyncStatus("Sync finished successfully")
+			log.Infoln(getSyncStatus())
 		}
 		ok := waitNextSync(ctx)
 		if !ok {
@@ -193,21 +192,56 @@ func syncRoots(ctx context.Context) error {
 		log.Infoln("No changes detected")
 		return nil
 	}
-	syncing = true
-	defer func() { syncing = false }()
-	for _, job := range jobs {
-		syncStatus = job.String()
-		log.Infoln(syncStatus)
+	setSyncing(true)
+	defer setSyncing(false)
+
+	// Metadata jobs run first, one at a time, in the order reconciliation put
+	// them in. They are millisecond-scale API and filesystem calls, so there
+	// is nothing to win by running them concurrently, and running them first
+	// means a folder always exists before anything is transferred into it.
+	metadata, transfers := splitJobs(jobs)
+	for _, job := range metadata {
+		setSyncStatus(job.String())
+		log.Infoln(job.String())
 		if cfg.DryRun {
 			continue
 		}
-		err = job.Run(ctx)
-		if err != nil {
-			syncStatus = "Error: " + err.Error()
+		if err := job.Run(ctx); err != nil {
+			setSyncStatus("Error: " + err.Error())
 			return err
 		}
 	}
+
+	if cfg.DryRun {
+		for _, job := range transfers {
+			log.Infoln(job.String())
+		}
+		return nil
+	}
+
+	setSyncStatus(fmt.Sprintf("Transferring %d file(s)", len(transfers)))
+	err = runTransfers(ctx, transfers, cfg.Concurrency)
+	if err != nil {
+		setSyncStatus("Error: " + err.Error())
+		return err
+	}
 	return nil
+}
+
+// splitJobs separates the jobs that move file contents from the ones that only
+// touch metadata. Only the former run concurrently.
+func splitJobs(jobs []iJob) (metadata []iJob, transfers []iTransferJob) {
+	for _, job := range jobs {
+		switch j := job.(type) {
+		case *downloadJob:
+			transfers = append(transfers, j)
+		case *uploadJob:
+			transfers = append(transfers, j)
+		default:
+			metadata = append(metadata, job)
+		}
+	}
+	return metadata, transfers
 }
 
 func waitNextSync(ctx context.Context) bool {
